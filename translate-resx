@@ -65,7 +65,7 @@ for ($i = 0; $i < $totalCount; $i++) {
 				continue 2;
 			}			
 			$comment = escapeComment($comment); // Escape problematic stuff, and {TAGS} so they aren't translated
-			$translation = shell_exec("trans -b :" . $targetLang . ' "' . $comment . ' "');
+			$translation = shell_exec("trans -b :" . $targetLang . ' "' . $comment . '"');
 			if (!empty($translation) && strpos($translation, '[ERROR] Rate limiting') === false) {
 				$parsedLang->data[$i]->value = trimNoTranslate($translation);
 				echo "[{$i}/{$totalCount}] (Google): {$parsedLang->data[$i]->comment} → {$parsedLang->data[$i]->value}\n";

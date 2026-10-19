@@ -1,0 +1,163 @@
+#!/usr/bin/env php
+<?php
+/**
+* Translates resx strings using common translate services
+* 
+* Usage: 
+* ./translate-resx -i /path/to/inputfile.resx -l targetlanguagecode
+*
+* Copy to ~/bin to call it anywhere without ./
+*
+* Requires the CLI PHP interpreter
+* On debian based linux, install with "sudo apt install php-cli"
+*
+* Uses the SimpleXML extension for PHP.
+* On debian based linux, install with "sudo apt install php-xml" 
+*
+* Uses translate-shell to send the translation requests
+* On debian based linux, install with "sudo apt install translate-shell" 
+*
+* MIT License
+* Copyright (c) 2026 Francisco Ontanaya Aparicio
+*/
+
+// Load command arguments
+//  * Can't getopt individual arguments, have to parse all at once
+//  * Required (x:) won't be on the output array if they don't have a value
+//  * Optional (x::) or flags (x) have a boolean false as value.
+$options = getopt('i:l:h', ['help']);
+if (isset($options['h']) || isset($options['help'])) {
+	echo "Usage: translate-resx [OPTION...]\n
+	 -i	full path to input resx file to translate\n
+	 -l	target language\n
+	 -h,--help	this help list\n";
+}
+
+if (empty($options['l'])) { echo "Missing target language code: -l\n"; exit(); }
+$targetLang = $options['l'];
+$transCodes = explode("\n", shell_exec('trans -list-codes'));
+if (!in_array($targetLang, $transCodes)) { echo "Unsupported language code. Use trans -list-codes to view supported ones.\n"; exit(); }
+
+if (empty($options['i'])) { echo "Missing input file path: -i\n"; exit(); }
+$inputResx = $options['i'];
+$parsedLang = loadResx($inputResx);
+
+// Backup the input file with a timestamped filename
+$resxPath = pathinfo($inputResx);
+$backupFilename = $resxPath['dirname'] . '/' . time() . '_' . $resxPath['filename'] . '.bak';
+copy($inputResx,  $backupFilename);
+echo "Backed up original file to {$backupFilename}\n";
+
+// Translate everything
+$totalCount = count($parsedLang->data);
+echo "Strings count: {$totalCount}\n";
+for ($i = 0; $i < $totalCount; $i++) {
+	// Transate if comment and value are the same (mostly untranslated strings).
+	$comment = $parsedLang->data[$i]->comment;
+	$value = $parsedLang->data[$i]->value;
+	if (isset($comment) && isset($value) && strcmp($comment, $value) === 0) {
+		// Loop to wait rate limit
+		// Just some arbitrary math to do incremental waits
+		for ($r = 1; $r < 122; $r += 10) {
+			usleep($r*250000);			
+			if (!isTranslatable($comment)) { // Skip entries that only have punctuation, numbers or symbols.
+				echo "[{$i}/{$totalCount}] Skipped untranslatable string: {$comment}\n";
+				continue 2;
+			}			
+			$comment = escapeComment($comment); // Escape problematic stuff, and {TAGS} so they aren't translated
+			$translation = shell_exec("trans -b :" . $targetLang . ' "' . $comment . ' "');
+			if (!empty($translation) && strpos($translation, '[ERROR] Rate limiting') === false) {
+				$parsedLang->data[$i]->value = trimNoTranslate($translation);
+				echo "[{$i}/{$totalCount}] (Google): {$parsedLang->data[$i]->comment} → {$parsedLang->data[$i]->value}\n";
+				break;
+			} else { // Try Bing instead
+				$translation = shell_exec("trans -e bing -b :" . $targetLang . ' "' . $comment . '"');				
+				if (!empty($translation) && strpos($translation, '[ERROR] Rate limiting') === false) {
+					$parsedLang->data[$i]->value = trimNoTranslate($translation);
+					echo "[{$i}/{$totalCount}] (Bing): {$parsedLang->data[$i]->comment} → {$parsedLang->data[$i]->value}\n";
+					break;
+				} else {
+					if (!empty($translation)) { continue; } // We don't retry loop this
+					echo "[{$i}/{$totalCount}] Skipped, too many retries.\n";
+				}
+			}
+		}
+		if ($r > 100) { 
+			echo "Too many retries for rate limits, giving up.\n";
+			saveTranslation($parsedLang, $inputResx);
+			break; 
+		} 
+	} else {
+		echo "[{$i}/{$totalCount}] Skipped, already translated?: {$comment} → {$value}\n";
+	}
+	// Save completed work every 100 lines.
+	if (($i / 100) === (int)($i / 100)) {
+		echo "[{$i}/{$totalCount}] (Saving work...)\n";
+		saveTranslation($parsedLang, $inputResx);
+	}
+}
+saveTranslation($parsedLang, $inputResx);
+exit();
+
+// Validate and load resx files
+function loadResx($filepath) : object {
+	if (!is_file($filepath)) { echo "The input argument is not a valid file.\n"; exit(); }
+	if (mime_content_type($filepath) !== 'text/xml') { echo "The input argument is not a XML file.\n"; exit(); }
+
+	//$xml = file_get_contents('/home/fran/Documents/My Games/Gruntz/Languages/ca-auto.resx');
+	$xml = file_get_contents($filepath);
+
+	if (empty($xml)) { echo "The input file is empty.\n"; exit(); }
+
+	try {
+		$parsedLang = new SimpleXMLElement($xml, LIBXML_NOERROR); // constant needed to make it catchable.
+	} catch (Exception $e) { 
+		echo $e->message, "\n";
+		exit();
+	} 
+
+	$resmimetype = $parsedLang->xpath('resheader[@name="resmimetype"]/value');
+	// Have to cast to string, xpath returns a SimpleXMLElement object with '0' as identifier, which you can't reference, and string as value
+	if ((string)$resmimetype[0] !== 'text/microsoft-resx') { echo "The input file is not a resx XML type.\n"; exit(); }
+	return $parsedLang;
+}
+
+
+// Skip invalid contents
+function isTranslatable($comment) : bool {
+	// Skip entries that don't have alphabetic content.
+	// \p{L} is word characters (\w won't work because it includes numbers)
+	// u modifier is for all Unicode, so it maches non Latin word characters properly (not essential here).
+	return preg_match('/\p{L}/u', $comment);
+}
+
+// Prpare comment text to go through translation
+function escapeComment($comment) : string {
+	// Escape quotes
+	$comment = str_replace('"', '\"', $comment);
+
+	// Escape parameter tags so it doesn't translate them. Works for Bing too.
+	$comment = preg_replace('/(\{[A-Z0-9 ]+\})/', '<span class="notranslate">\1</span>', $comment); 
+			
+	// Add a leading space to prevent several translate-shell issues:
+	// * Forward slash as first character gets read as the start of regular expression pattern
+	// * Hyphen as first character freezes translate-shell (probably gets parsed as a command line parameter)
+	$comment = ' ' . $comment;
+	
+	return $comment;
+}
+
+// Trim and remove no translate tags
+function trimNoTranslate($translation) : string {
+	$newValue = trim(str_replace("\n", " ", $translation));
+	$newValue = str_replace("<span class=notranslate>{", "{", $newValue);
+	$newValue = str_replace("}</span>", "}", $newValue);
+	return $newValue;
+}
+
+// Convert back to raw XML and write to file
+function saveTranslation($parsedLang, $file) {
+	if (!is_writable($file)) { echo "Can write data to the input file.\n"; exit(); }
+	$newXML = $parsedLang->asXML();	
+	file_put_contents($file, $newXML);
+}

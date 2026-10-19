@@ -13,11 +13,8 @@ The current version of your file will be backed up to timestamp_filename.bak. Th
 ## Requirements
 Requires any Linux install with the required packages.
 
-Requires the CLI PHP interpreter
-On debian based linux, install with "sudo apt install php-cli"
+Requires the CLI PHP interpreter. On debian based linux, install with "sudo apt install php-cli"
 
-Uses the SimpleXML extension for PHP.
-On debian based linux, install with "sudo apt install php-xml" 
+Uses the SimpleXML extension for PHP. On debian based linux, install with "sudo apt install php-xml" 
 
-Uses translate-shell to send the translation requests
-On debian based linux, install with "sudo apt install translate-shell"
+Uses translate-shell to send the translation requests. On debian based linux, install with "sudo apt install translate-shell"
